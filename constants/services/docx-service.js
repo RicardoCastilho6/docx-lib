@@ -1,40 +1,72 @@
 const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
-const zlib = require("node:zlib");
+const JSZip = require("jszip")
 const DOCX = require("../utils/docx-params");
 
+const unzipDocx = async (docxPath, outputDir) => {
+  try {
+    const data = await fs.promises.readFile(docxPath);
+    const zip = await JSZip.loadAsync(data);
+
+    await Promise.all(
+      Object.keys(zip.files).map(async (relativePath) => {
+        const file = zip.files[relativePath];
+        const fullPath = path.join(outputDir, relativePath);
+
+        if (file.dir) {
+          await fs.promises.mkdir(fullPath, { recursive: true });
+        } else {
+          const content = await file.async("nodebuffer");
+          await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
+          await fs.promises.writeFile(fullPath, content);
+        }
+      })
+    );
+
+    console.log(`${docxPath} descompactado em ${outputDir}`);
+  } catch (err) {
+    throw new Error(`Erro ao descompactar ${docxPath}: ${err.message}`);
+  }
+};
+
 const mergeDocxFolders = async (files, outputFilePath) => {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error(DOCX.ERROR_INVALID_FOLDER_LIST);
+  }
+
+  const tempFolders = [];
+  for (const file of files) {
+    const tempDir = path.join(
+      DOCX.TEMP_DIR_MERGE,
+      path.basename(file, ".docx")
+    );
+    await unzipDocx(file, tempDir);
+    tempFolders.push(tempDir);
+  }
+
+  const TEMP_DIR = path.join(DOCX.TEMP_DIR_MERGE, "merged");
+  if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+  }
+
+  tempFolders.forEach((folder, index) => {
+    if (index === 0) {
+      copyFolderRecursiveSync(folder, TEMP_DIR);
+    } else {
+      mergeDocxContent(folder, TEMP_DIR);
+    }
+  });
+
+  const output = fs.createWriteStream(outputFilePath);
+  const archive = archiver("zip", { zlib: { level: DOCX.COMPRESSION_LEVEL } });
+
   return new Promise((resolve, reject) => {
-    if (!Array.isArray(folders) || folders.length === 0) {
-      return reject(new Error(DOCX.ERROR_INVALID_FOLDER_LIST));
-    }
-
-    folders.forEach((folder) => {
-      if (!fs.existsSync(folder)) {
-        return reject(new Error(DOCX.ERROR_FOLDER_NOT_FOUND.replace("{folder}", folder)));
-      }
-    });
-
-    const TEMP_DIR = DOCX.TEMP_DIR_MERGE;
-    if (!fs.existsSync(TEMP_DIR)) {
-      fs.mkdirSync(TEMP_DIR, { recursive: true });
-    }
-
-    folders.forEach((folder, index) => {
-      if (index === 0) {
-        copyFolderRecursiveSync(folder, TEMP_DIR);
-      } else {
-        mergeDocxContent(folder, TEMP_DIR);
-      }
-    });
-
-    const output = fs.createWriteStream(outputFilePath);
-    const archive = archiver("zip", { zlib: { level: DOCX.COMPRESSION_LEVEL } });
-
     output.on("close", () => {
-      console.log(DOCX.SUCCESS_MERGE.replace("{outputFilePath}", outputFilePath));
-      fs.rmSync(TEMP_DIR, { recursive: true, force: true });
+      console.log(
+        DOCX.SUCCESS_MERGE.replace("{outputFilePath}", outputFilePath)
+      );
+      fs.rmSync(DOCX.TEMP_DIR_MERGE, { recursive: true, force: true });
       resolve();
     });
 
@@ -94,7 +126,10 @@ const updateRelationships = (sourceFolder, targetFolder) => {
   const relationships = sourceRels.match(DOCX.MATCH_RELATIONSHIP) || [];
   relationships.forEach((rel) => {
     if (!targetRels.includes(rel)) {
-      targetRels = targetRels.replace(DOCX.RELS_END_TAG, `${rel}\n${DOCX.RELS_END_TAG}`);
+      targetRels = targetRels.replace(
+        DOCX.RELS_END_TAG,
+        `${rel}\n${DOCX.RELS_END_TAG}`
+      );
     }
   });
 
@@ -124,7 +159,10 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
     const body2 = content2.match(DOCX.MATCH_BODY)?.[1] || "";
     const mergedBody = body1 + body2;
 
-    const mergedContent = content1.replace(DOCX.REPLACE_BODY, DOCX.MERGE_BODY({ mergedBody }));
+    const mergedContent = content1.replace(
+      DOCX.REPLACE_BODY,
+      DOCX.MERGE_BODY({ mergedBody })
+    );
 
     fs.writeFileSync(docXmlPath1, mergedContent, DOCX.ENCODING);
 
