@@ -108,23 +108,25 @@ const mergeMedia = (sourceFolder, targetFolder, renamedMediaMap) => {
 
   const files = fs.readdirSync(sourceMedia);
   files.forEach((file) => {
-    let destFile = path.join(targetMedia, file);
+    const ext = path.extname(file);
+    const base = path.basename(file, ext);
     let newFilename = file;
     let counter = 1;
 
-    while (fs.existsSync(destFile)) {
-      const ext = path.extname(file);
-      const base = path.basename(file, ext);
+    // Evita conflito de nomes na pasta destino
+    while (fs.existsSync(path.join(targetMedia, newFilename))) {
       newFilename = `${base}_${counter}${ext}`;
-      destFile = path.join(targetMedia, newFilename);
       counter++;
     }
+
+    fs.copyFileSync(
+      path.join(sourceMedia, file),
+      path.join(targetMedia, newFilename)
+    );
 
     if (newFilename !== file) {
       renamedMediaMap.set(file, newFilename);
     }
-
-    fs.copyFileSync(path.join(sourceMedia, file), destFile);
   });
 };
 
@@ -132,10 +134,10 @@ const updateRelationships = (sourceFolder, targetFolder, renamedMediaMap) => {
   const sourceRelsPath = path.join(sourceFolder, DOCX.RELS_FILE);
   const targetRelsPath = path.join(targetFolder, DOCX.RELS_FILE);
 
-  if (!fs.existsSync(sourceRelsPath)) return;
+  if (!fs.existsSync(sourceRelsPath)) return new Map();
 
   const sourceRelsXml = fs.readFileSync(sourceRelsPath, DOCX.ENCODING);
-  let targetRelsXml = fs.existsSync(targetRelsPath)
+  const targetRelsXml = fs.existsSync(targetRelsPath)
     ? fs.readFileSync(targetRelsPath, DOCX.ENCODING)
     : DOCX.ENCODE_DEFAULT;
 
@@ -150,32 +152,47 @@ const updateRelationships = (sourceFolder, targetFolder, renamedMediaMap) => {
 
   const existingIds = new Set();
   for (let i = 0; i < targetRels.length; i++) {
-    existingIds.add(targetRels[i].getAttribute("Id"));
+    const id = targetRels[i].getAttribute("Id");
+    if (id) existingIds.add(id);
   }
 
+  let nextIdCounter = 1000;
+  const idMap = new Map();
+
   for (let i = 0; i < sourceRels.length; i++) {
-    const sourceRel = sourceRels[i];
-    const id = sourceRel.getAttribute("Id");
-    if (!existingIds.has(id)) {
-      const newRel = sourceRel.cloneNode(true);
-      const targetAttr = newRel.getAttribute("Target");
-      if (targetAttr && targetAttr.startsWith("../media/")) {
-        const filename = path.basename(targetAttr);
-        if (renamedMediaMap.has(filename)) {
-          newRel.setAttribute(
-            "Target",
-            `../media/${renamedMediaMap.get(filename)}`
-          );
-        }
-      }
-      targetDoc.documentElement.appendChild(newRel);
-      existingIds.add(id);
+    const rel = sourceRels[i];
+    const type = rel.getAttribute("Type");
+    let target = rel.getAttribute("Target");
+
+    const filename = path.basename(target);
+    if (renamedMediaMap.has(filename)) {
+      target = `media/${renamedMediaMap.get(filename)}`;
+    } else if (target.startsWith("../media/")) {
+      target = `media/${filename}`;
     }
+
+    let newId;
+    do {
+      newId = `rId${nextIdCounter++}`;
+    } while (existingIds.has(newId));
+
+    const oldId = rel.getAttribute("Id");
+    idMap.set(oldId, newId);
+
+    const newRel = rel.cloneNode(true);
+    newRel.setAttribute("Id", newId);
+    newRel.setAttribute("Target", target);
+
+    targetDoc.documentElement.appendChild(newRel);
+    existingIds.add(newId);
   }
 
   const updatedXml = serializer.serializeToString(targetDoc);
   fs.writeFileSync(targetRelsPath, updatedXml, DOCX.ENCODING);
+
+  return idMap;
 };
+
 
 const mergeContentTypes = (sourceFolder, targetFolder) => {
   const sourcePath = path.join(sourceFolder, DOCX.CONTENT_TYPES_FILE);
@@ -303,7 +320,6 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
     const doc2 = parser.parseFromString(content2, DOCX.XML);
 
     const documentElement = doc1.documentElement;
-
     ensureNamespaces(documentElement, DOCX.NS_CHECK);
 
     const body1 = doc1.getElementsByTagNameNS(DOCX.W_NS, "body")[0];
@@ -328,19 +344,42 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
       body1.appendChild(sectPrToAppend.cloneNode(true));
     }
 
+    // Após fusão do conteúdo
+    const renamedMediaMap = new Map();
+    mergeMedia(sourceFolder, targetFolder, renamedMediaMap);
+    const idMap = updateRelationships(sourceFolder, targetFolder, renamedMediaMap);
+    mergeContentTypes(sourceFolder, targetFolder);
+    mergeStylesAndSettings(sourceFolder, targetFolder);
+    mergeStylesXml(sourceFolder, targetFolder);
+
+    // Substitui rId antigos pelos novos no conteúdo do document.xml
+    if (idMap.size > 0) {
+      const allElements = doc1.getElementsByTagName("*");
+      for (let i = 0; i < allElements.length; i++) {
+        const el = allElements[i];
+        if (el.hasAttribute("r:embed")) {
+          const oldId = el.getAttribute("r:embed");
+          if (idMap.has(oldId)) {
+            el.setAttribute("r:embed", idMap.get(oldId));
+          }
+        }
+        if (el.hasAttribute("r:id")) {
+          const oldId = el.getAttribute("r:id");
+          if (idMap.has(oldId)) {
+            el.setAttribute("r:id", idMap.get(oldId));
+          }
+        }
+      }
+    }
+
+    // Salva o document.xml atualizado com novos rId
     fs.writeFileSync(
       docXmlPath1,
       serializer.serializeToString(doc1),
       DOCX.ENCODING
     );
-
-    const renamedMediaMap = new Map();
-    mergeMedia(sourceFolder, targetFolder, renamedMediaMap);
-    updateRelationships(sourceFolder, targetFolder, renamedMediaMap);
-    mergeContentTypes(sourceFolder, targetFolder);
-    mergeStylesAndSettings(sourceFolder, targetFolder);
-    mergeStylesXml(sourceFolder, targetFolder);
   }
 };
+
 
 module.exports = { mergeDocxFolders };

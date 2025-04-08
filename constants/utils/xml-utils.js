@@ -1,4 +1,4 @@
-export const ensureNamespaces = (element, namespaces) => {
+const ensureNamespaces = (element, namespaces) => {
   const attrs = new Set();
 
   for (let i = 0; i < element.attributes.length; i++) {
@@ -14,3 +14,5 @@ export const ensureNamespaces = (element, namespaces) => {
     }
   }
 };
+
+module.exports = { ensureNamespaces };
