@@ -242,6 +242,52 @@ const mergeStylesAndSettings = (sourceFolder, targetFolder) => {
   });
 };
 
+const mergeStylesXml = (sourceFolder, targetFolder) => {
+  const sourcePath = path.join(sourceFolder, "word/styles.xml");
+  const targetPath = path.join(targetFolder, "word/styles.xml");
+
+  if (!fs.existsSync(sourcePath)) return;
+
+  const parser = new DOMParser();
+  const serializer = new XMLSerializer();
+
+  const sourceXml = fs.readFileSync(sourcePath, DOCX.ENCODING);
+  const sourceDoc = parser.parseFromString(sourceXml, DOCX.XML);
+
+  let targetDoc;
+  if (fs.existsSync(targetPath)) {
+    const targetXml = fs.readFileSync(targetPath, DOCX.ENCODING);
+    targetDoc = parser.parseFromString(targetXml, DOCX.XML);
+  } else {
+    targetDoc = parser.parseFromString(DOCX.STYLE_DEFAULT, DOCX.XML);
+  }
+
+  const sourceStyles = sourceDoc.getElementsByTagNameNS(DOCX.W_NS, "style");
+  const targetStyles = targetDoc.getElementsByTagNameNS(DOCX.W_NS, "style");
+
+  const existingStyleIds = new Set();
+  for (let i = 0; i < targetStyles.length; i++) {
+    const styleId = targetStyles[i].getAttribute("w:styleId");
+    if (styleId) existingStyleIds.add(styleId);
+  }
+
+  for (let i = 0; i < sourceStyles.length; i++) {
+    const style = sourceStyles[i];
+    const styleId = style.getAttribute("w:styleId");
+    if (!existingStyleIds.has(styleId)) {
+      const imported = targetDoc.importNode(style, true);
+      targetDoc.documentElement.appendChild(imported);
+      existingStyleIds.add(styleId);
+    }
+  }
+
+  fs.writeFileSync(
+    targetPath,
+    serializer.serializeToString(targetDoc),
+    DOCX.ENCODING
+  );
+};
+
 const mergeDocxContent = (sourceFolder, targetFolder) => {
   const docXmlPath1 = path.join(targetFolder, DOCX.DOCUMENT_XML);
   const docXmlPath2 = path.join(sourceFolder, DOCX.DOCUMENT_XML);
@@ -269,7 +315,6 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
     }
 
     let sectPrToAppend = null;
-
     for (let i = 0; i < body2.childNodes.length; i++) {
       const node = body2.childNodes[i];
       if (node.nodeName === "w:sectPr") {
@@ -277,6 +322,10 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
       } else {
         body1.appendChild(node.cloneNode(true));
       }
+    }
+
+    if (sectPrToAppend) {
+      body1.appendChild(sectPrToAppend.cloneNode(true));
     }
 
     fs.writeFileSync(
@@ -290,6 +339,7 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
     updateRelationships(sourceFolder, targetFolder, renamedMediaMap);
     mergeContentTypes(sourceFolder, targetFolder);
     mergeStylesAndSettings(sourceFolder, targetFolder);
+    mergeStylesXml(sourceFolder, targetFolder);
   }
 };
 

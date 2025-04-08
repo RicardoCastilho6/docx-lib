@@ -20,6 +20,8 @@ module.exports = {
   TEMP_DIR_MERGE: "../../tmp/docx/temp_merge",
   TEMP_DIR_OUTPUT: "../../tmp/docx/output_merge",
 
+  STYLE_DEFAULT: '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>',
+
   NS_CHECK: {
     w: "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
     r: "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
