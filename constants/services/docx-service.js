@@ -257,15 +257,26 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
     const doc2 = parser.parseFromString(content2, DOCX.XML);
 
     const documentElement = doc1.documentElement;
-    
-    ensureNamespaces(documentElement, DOCX.NS_CHECK)
+
+    ensureNamespaces(documentElement, DOCX.NS_CHECK);
 
     const body1 = doc1.getElementsByTagNameNS(DOCX.W_NS, "body")[0];
     const body2 = doc2.getElementsByTagNameNS(DOCX.W_NS, "body")[0];
 
+    let lastChild1 = body1.lastChild;
+    if (lastChild1 && lastChild1.nodeName === "w:sectPr") {
+      body1.removeChild(lastChild1);
+    }
+
+    let sectPrToAppend = null;
+
     for (let i = 0; i < body2.childNodes.length; i++) {
       const node = body2.childNodes[i];
-      body1.appendChild(node.cloneNode(true));
+      if (node.nodeName === "w:sectPr") {
+        sectPrToAppend = node;
+      } else {
+        body1.appendChild(node.cloneNode(true));
+      }
     }
 
     fs.writeFileSync(
