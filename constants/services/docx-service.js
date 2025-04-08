@@ -1,8 +1,10 @@
 const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
-const JSZip = require("jszip")
+const JSZip = require("jszip");
+const { DOMParser, XMLSerializer } = require("xmldom");
 const DOCX = require("../utils/docx-params");
+const { ensureNamespaces } = require("../utils/xml-utils");
 
 const unzipDocx = async (docxPath, outputDir) => {
   try {
@@ -94,7 +96,7 @@ const copyFolderRecursiveSync = (source, target) => {
   });
 };
 
-const mergeMedia = (sourceFolder, targetFolder) => {
+const mergeMedia = (sourceFolder, targetFolder, renamedMediaMap) => {
   const sourceMedia = path.join(sourceFolder, DOCX.MEDIA_FOLDER);
   const targetMedia = path.join(targetFolder, DOCX.MEDIA_FOLDER);
 
@@ -104,36 +106,129 @@ const mergeMedia = (sourceFolder, targetFolder) => {
     fs.mkdirSync(targetMedia, { recursive: true });
   }
 
-  fs.readdirSync(sourceMedia).forEach((file) => {
-    const srcFile = path.join(sourceMedia, file);
-    const destFile = path.join(targetMedia, file);
+  const files = fs.readdirSync(sourceMedia);
+  files.forEach((file) => {
+    let destFile = path.join(targetMedia, file);
+    let newFilename = file;
+    let counter = 1;
 
-    if (!fs.existsSync(destFile)) {
-      fs.copyFileSync(srcFile, destFile);
+    while (fs.existsSync(destFile)) {
+      const ext = path.extname(file);
+      const base = path.basename(file, ext);
+      newFilename = `${base}_${counter}${ext}`;
+      destFile = path.join(targetMedia, newFilename);
+      counter++;
     }
+
+    if (newFilename !== file) {
+      renamedMediaMap.set(file, newFilename);
+    }
+
+    fs.copyFileSync(path.join(sourceMedia, file), destFile);
   });
 };
 
-const updateRelationships = (sourceFolder, targetFolder) => {
+const updateRelationships = (sourceFolder, targetFolder, renamedMediaMap) => {
   const sourceRelsPath = path.join(sourceFolder, DOCX.RELS_FILE);
   const targetRelsPath = path.join(targetFolder, DOCX.RELS_FILE);
 
   if (!fs.existsSync(sourceRelsPath)) return;
 
-  let sourceRels = fs.readFileSync(sourceRelsPath, DOCX.ENCODING);
-  let targetRels = fs.readFileSync(targetRelsPath, DOCX.ENCODING);
+  const sourceRelsXml = fs.readFileSync(sourceRelsPath, DOCX.ENCODING);
+  let targetRelsXml = fs.existsSync(targetRelsPath)
+    ? fs.readFileSync(targetRelsPath, DOCX.ENCODING)
+    : DOCX.ENCODE_DEFAULT;
 
-  const relationships = sourceRels.match(DOCX.MATCH_RELATIONSHIP) || [];
-  relationships.forEach((rel) => {
-    if (!targetRels.includes(rel)) {
-      targetRels = targetRels.replace(
-        DOCX.RELS_END_TAG,
-        `${rel}\n${DOCX.RELS_END_TAG}`
+  const parser = new DOMParser();
+  const serializer = new XMLSerializer();
+
+  const sourceDoc = parser.parseFromString(sourceRelsXml, DOCX.XML);
+  const targetDoc = parser.parseFromString(targetRelsXml, DOCX.XML);
+
+  const sourceRels = sourceDoc.getElementsByTagName("Relationship");
+  const targetRels = targetDoc.getElementsByTagName("Relationship");
+
+  const existingIds = new Set();
+  for (let i = 0; i < targetRels.length; i++) {
+    existingIds.add(targetRels[i].getAttribute("Id"));
+  }
+
+  for (let i = 0; i < sourceRels.length; i++) {
+    const sourceRel = sourceRels[i];
+    const id = sourceRel.getAttribute("Id");
+    if (!existingIds.has(id)) {
+      const newRel = sourceRel.cloneNode(true);
+      const targetAttr = newRel.getAttribute("Target");
+      if (targetAttr && targetAttr.startsWith("../media/")) {
+        const filename = path.basename(targetAttr);
+        if (renamedMediaMap.has(filename)) {
+          newRel.setAttribute(
+            "Target",
+            `../media/${renamedMediaMap.get(filename)}`
+          );
+        }
+      }
+      targetDoc.documentElement.appendChild(newRel);
+      existingIds.add(id);
+    }
+  }
+
+  const updatedXml = serializer.serializeToString(targetDoc);
+  fs.writeFileSync(targetRelsPath, updatedXml, DOCX.ENCODING);
+};
+
+const mergeContentTypes = (sourceFolder, targetFolder) => {
+  const sourcePath = path.join(sourceFolder, DOCX.CONTENT_TYPES_FILE);
+  const targetPath = path.join(targetFolder, DOCX.CONTENT_TYPES_FILE);
+
+  if (!fs.existsSync(sourcePath)) return;
+
+  const sourceXml = fs.readFileSync(sourcePath, DOCX.ENCODING);
+  const targetXml = fs.readFileSync(targetPath, DOCX.ENCODING);
+
+  const parser = new DOMParser();
+  const serializer = new XMLSerializer();
+
+  const sourceDoc = parser.parseFromString(sourceXml, DOCX.XML);
+  const targetDoc = parser.parseFromString(targetXml, DOCX.XML);
+
+  // Merge Defaults
+  const sourceDefaults = sourceDoc.getElementsByTagName("Default");
+  for (let i = 0; i < sourceDefaults.length; i++) {
+    const def = sourceDefaults[i];
+    const ext = def.getAttribute("Extension");
+    const contentType = def.getAttribute("ContentType");
+    const exists = Array.from(targetDoc.getElementsByTagName("Default")).some(
+      (d) => d.getAttribute("Extension") === ext
+    );
+    if (!exists) {
+      const imported = targetDoc.importNode(def, true);
+      targetDoc.documentElement.insertBefore(
+        imported,
+        targetDoc.documentElement.firstChild
       );
     }
-  });
+  }
 
-  fs.writeFileSync(targetRelsPath, targetRels, DOCX.ENCODING);
+  // Merge Overrides
+  const sourceOverrides = sourceDoc.getElementsByTagName("Override");
+  for (let i = 0; i < sourceOverrides.length; i++) {
+    const ovr = sourceOverrides[i];
+    const partName = ovr.getAttribute("PartName");
+    const exists = Array.from(targetDoc.getElementsByTagName("Override")).some(
+      (o) => o.getAttribute("PartName") === partName
+    );
+    if (!exists) {
+      const imported = targetDoc.importNode(ovr, true);
+      targetDoc.documentElement.appendChild(imported);
+    }
+  }
+
+  fs.writeFileSync(
+    targetPath,
+    serializer.serializeToString(targetDoc),
+    DOCX.ENCODING
+  );
 };
 
 const mergeStylesAndSettings = (sourceFolder, targetFolder) => {
@@ -155,19 +250,34 @@ const mergeDocxContent = (sourceFolder, targetFolder) => {
     const content1 = fs.readFileSync(docXmlPath1, DOCX.ENCODING);
     const content2 = fs.readFileSync(docXmlPath2, DOCX.ENCODING);
 
-    const body1 = content1.match(DOCX.MATCH_BODY)?.[1] || "";
-    const body2 = content2.match(DOCX.MATCH_BODY)?.[1] || "";
-    const mergedBody = body1 + body2;
+    const parser = new DOMParser();
+    const serializer = new XMLSerializer();
 
-    const mergedContent = content1.replace(
-      DOCX.REPLACE_BODY,
-      DOCX.MERGE_BODY({ mergedBody })
+    const doc1 = parser.parseFromString(content1, DOCX.XML);
+    const doc2 = parser.parseFromString(content2, DOCX.XML);
+
+    const documentElement = doc1.documentElement;
+    
+    ensureNamespaces(documentElement, DOCX.NS_CHECK)
+
+    const body1 = doc1.getElementsByTagNameNS(DOCX.W_NS, "body")[0];
+    const body2 = doc2.getElementsByTagNameNS(DOCX.W_NS, "body")[0];
+
+    for (let i = 0; i < body2.childNodes.length; i++) {
+      const node = body2.childNodes[i];
+      body1.appendChild(node.cloneNode(true));
+    }
+
+    fs.writeFileSync(
+      docXmlPath1,
+      serializer.serializeToString(doc1),
+      DOCX.ENCODING
     );
 
-    fs.writeFileSync(docXmlPath1, mergedContent, DOCX.ENCODING);
-
-    mergeMedia(sourceFolder, targetFolder);
-    updateRelationships(sourceFolder, targetFolder);
+    const renamedMediaMap = new Map();
+    mergeMedia(sourceFolder, targetFolder, renamedMediaMap);
+    updateRelationships(sourceFolder, targetFolder, renamedMediaMap);
+    mergeContentTypes(sourceFolder, targetFolder);
     mergeStylesAndSettings(sourceFolder, targetFolder);
   }
 };
